@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const session = require('express-session');
 var passport = require('passport');
 var crypto = require('crypto');
+const {
+    isAuth,
+    isAdmin
+} = require('./authMiddleware');
 var LocalStrategy = require('passport-local').Strategy;
 
 // Package documentation - https://www.npmjs.com/package/connect-mongo
@@ -20,7 +24,9 @@ require('dotenv').config();
 var app = express();
 
 app.use(express.json());
-app.use(express.urlencoded({extended: true}));
+app.use(express.urlencoded({
+    extended: true
+}));
 
 /**
  * -------------- DATABASE ----------------
@@ -31,7 +37,7 @@ app.use(express.urlencoded({extended: true}));
  * string into the `.env` file
  * 
  * DB_STRING=mongodb://<user>:<password>@localhost:27017/database_name
- */ 
+ */
 
 const conn = process.env.DB_STRING;
 
@@ -49,7 +55,8 @@ connection.on('connecting', () => {
 const UserSchema = new mongoose.Schema({
     username: String,
     hash: String,
-    salt: String
+    salt: String,
+    isAdmin: Boolean
 });
 
 
@@ -64,31 +71,35 @@ const User = connection.model('User', UserSchema);
  * `req.session.passport` object. 
  */
 passport.use(new LocalStrategy(
-    function(username, password, cb) {
-        User.findOne({ username: username })
+    function (username, password, cbb) {
+        User.findOne({
+                username: username
+            })
             .then((user) => {
 
-                if (!user) { return cb(null, false) }
-                
+                if (!user) {
+                    return cb(null, false)
+                }
+
                 // Function defined at bottom of app.js
                 const isValid = validPassword(password, user.hash, user.salt);
-                
+
                 if (isValid) {
                     return cb(null, user);
                 } else {
                     return cb(null, false);
                 }
             })
-            .catch((err) => {   
+            .catch((err) => {
                 cb(err);
             });
-}));
-  
+    }));
+
 /**
  * This function is used in conjunction with the `passport.authenticate()` method.  See comments in
  * `passport.use()` above ^^ for explanation
  */
-passport.serializeUser(function(user, cb) {
+passport.serializeUser(function (user, cb) {
     cb(null, user.id);
 });
 
@@ -99,9 +110,11 @@ passport.serializeUser(function(user, cb) {
  * In summary, this method is "set" on the passport object and is passed the user ID stored in the `req.session.passport`
  * object later on.
  */
-passport.deserializeUser(function(id, cb) {
+passport.deserializeUser(function (id, cb) {
     User.findById(id, function (err, user) {
-        if (err) { return cb(err); }
+        if (err) {
+            return cb(err);
+        }
         cb(null, user);
     });
 });
@@ -116,7 +129,10 @@ passport.deserializeUser(function(id, cb) {
  * 
  * Note that the `connection` used for the MongoStore is the same connection that we are using above
  */
-const sessionStore = new MongoStore({ mongooseConnection: connection, collection: 'sessions' })
+const sessionStore = new MongoStore({
+    mongooseConnection: connection,
+    collection: 'sessions'
+})
 
 /**
  * See the documentation for all possible options - https://www.npmjs.com/package/express-session
@@ -177,6 +193,10 @@ app.use(session({
  *      2.  If the `passport.deserializeUser()` returns a user object, this user object is assigned to the `req.user` property
  *          and can be accessed within the route.  If no user is returned, nothing happens and `next()` is called.
  */
+
+// Her htpp isteğimizde çalışacak 'initialize' metodu şunu yapar : 
+// 'req.session.passport.user' değerinin var olup olmadığına bakar. Peki bu ne demek oluyor, ne anlama geliyor ?
+// Eğer user varsa, yani userId'si varsa, anlıyoruz ki kullanıcı giriş yapmış yoksa kullanıcı giriş yapmamış, değeri yok.
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -192,7 +212,7 @@ app.get('/', (req, res, next) => {
 
 // When you visit http://localhost:3000/login, you will see "Login Page"
 app.get('/login', (req, res, next) => {
-   
+
     const form = '<h1>Login Page</h1><form method="POST" action="/login">\
     Enter Username:<br><input type="text" name="username">\
     <br>Enter Password:<br><input type="password" name="password">\
@@ -203,7 +223,10 @@ app.get('/login', (req, res, next) => {
 });
 
 // Since we are using the passport.authenticate() method, we should be redirected no matter what 
-app.post('/login', passport.authenticate('local', { failureRedirect: '/login-failure', successRedirect: 'login-success' }), (err, req, res, next) => {
+app.post('/login', passport.authenticate('local', {
+    failureRedirect: '/login-failure',
+    successRedirect: 'login-success'
+}), (err, req, res, next) => {
     if (err) next(err);
 });
 
@@ -216,20 +239,21 @@ app.get('/register', (req, res, next) => {
                     <br><br><input type="submit" value="Submit"></form>';
 
     res.send(form);
-    
+
 });
 
 app.post('/register', (req, res, next) => {
-    
+
     const saltHash = genPassword(req.body.password);
-    
+
     const salt = saltHash.salt;
     const hash = saltHash.hash;
 
     const newUser = new User({
         username: req.body.username,
         hash: hash,
-        salt: salt
+        salt: salt,
+        admin: true
     });
 
     newUser.save()
@@ -247,18 +271,35 @@ app.post('/register', (req, res, next) => {
  * 
  * Also, look up what behaviour express session has without a maxage set
  */
-app.get('/protected-route', (req, res, next) => {
-    
-    // This is how you check if a user is authenticated and protect a route.  You could turn this into a custom middleware to make it less redundant
-    if (req.isAuthenticated()) {
-        res.send('<h1>You are authenticated</h1><p><a href="/logout">Logout and reload</a></p>');
-    } else {
-        res.send('<h1>You are not authenticated</h1><p><a href="/login">Login</a></p>');
-    }
-});
+// Bu şekilde de yapabilirim, middleware şeklinde de kullanabilirim(aşağidaki gibi):
+// app.get('/protected-route', (req, res, next) => {
+
+//     // This is how you check if a user is authenticated and protect a route.  You could turn this into a custom middleware to make it less redundant
+//     if (req.isAuthenticated()) {
+//         res.send('<h1>You are authenticated</h1><p><a href="/logout">Logout and reload</a></p>');
+//     } else {
+//         res.send('<h1>You are not authenticated</h1><p><a href="/login">Login</a></p>');
+//     }
+// });
+
+app.get('/protected-route', isAuth, (req, res, next) => {
+    res.send("You made it to the route");
+})
+
+app.get('/admin-prote', isAdmin, (req, res, next) => {
+    res.send("You are admiin? Welcomee bro!");
+})
+
 
 // Visiting this route logs the user out
+// Logout'ta tıkladığımız zaman 'session'->'passport' objesi içindeki kayıtlı olan 'userId' silinir ve yeni bir cookie oluşturulur.
+// Bu cookie kayıtlı olmayan bir kullanıcı cookie'sidir ve logged out olunur.
 app.get('/logout', (req, res, next) => {
+
+    // Bu 'logout' fonksiyonu passportJS'e ait bir fonksiyondur.
+    // Bu fonksiyon çalıştırıldığında 'request.session.passport.userProperty' alanını temizler,siler!
+    // 'logout' gibi diğer hazır olan fonksiyonları da vardır şunlar gibi : isAuthenticated(), isUnauthenticated(), logIn()..
+    // NOT : 'logIn' fonksiyonu 'passport.authenticate()' çağrıldığı zaman otomatik çalıştırılır.
     req.logout();
     res.redirect('/protected-route');
 });
@@ -317,9 +358,9 @@ function validPassword(password, hash, salt) {
 function genPassword(password) {
     var salt = crypto.randomBytes(32).toString('hex');
     var genHash = crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
-    
+
     return {
-      salt: salt,
-      hash: genHash
+        salt: salt,
+        hash: genHash
     };
 }
